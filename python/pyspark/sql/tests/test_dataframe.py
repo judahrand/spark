@@ -1157,6 +1157,261 @@ class DataFrameTestsMixin:
                 lambda: spark.catalog.uncacheTable("does_not_exist"),
             )
 
+    def _to_table(self):
+        from datetime import datetime, date, timedelta
+
+        schema = (
+            StructType()
+            .add("a", IntegerType())
+            .add("b", StringType())
+            .add("c", BooleanType())
+            .add("d", FloatType())
+            .add("dt", DateType())
+            .add("ts", TimestampType())
+            .add("ts_ntz", TimestampNTZType())
+            .add("dt_interval", DayTimeIntervalType())
+        )
+        data = [
+            (
+                1,
+                "foo",
+                True,
+                3.0,
+                date(1969, 1, 1),
+                datetime(1969, 1, 1, 1, 1, 1),
+                datetime(1969, 1, 1, 1, 1, 1),
+                timedelta(days=1),
+            ),
+            (2, "foo", True, 5.0, None, None, None, None),
+            (
+                3,
+                "bar",
+                False,
+                -1.0,
+                date(2012, 3, 3),
+                datetime(2012, 3, 3, 3, 3, 3),
+                datetime(2012, 3, 3, 3, 3, 3),
+                timedelta(hours=-1, milliseconds=421),
+            ),
+            (
+                4,
+                "bar",
+                False,
+                6.0,
+                date(2100, 4, 4),
+                datetime(2100, 4, 4, 4, 4, 4),
+                datetime(2100, 4, 4, 4, 4, 4),
+                timedelta(microseconds=123),
+            ),
+        ]
+        df = self.spark.createDataFrame(data, schema)
+        return df.toTable()
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table(self):
+        import pyarrow
+
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            table = self._to_table()
+
+        arrow_schema = table.schema
+        self.assertTrue(
+            arrow_schema.equals(
+                pyarrow.schema(
+                    [
+                        pyarrow.field("a", pyarrow.int32()),
+                        pyarrow.field("b", pyarrow.string()),
+                        pyarrow.field("c", pyarrow.bool_()),
+                        pyarrow.field("d", pyarrow.float32()),
+                        pyarrow.field("dt", pyarrow.date32()),
+                        pyarrow.field("ts", pyarrow.timestamp("us", tz="UTC")),
+                        pyarrow.field("ts_ntz", pyarrow.timestamp("us")),
+                        pyarrow.field("dt_interval", pyarrow.duration("us")),
+                    ]
+                ),
+            ),
+        )
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_with_duplicated_column_names(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            import pyarrow
+
+            sql = "select 1 v, 1 v"
+            df = self.spark.sql(sql)
+            table = df.toTable()
+            arrow_schema = table.schema
+            self.assertTrue(
+                arrow_schema.equals(
+                    pyarrow.schema(
+                        [
+                            pyarrow.field("v", pyarrow.int32()),
+                            pyarrow.field("v", pyarrow.int32()),
+                        ],
+                    ),
+                )
+            )
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_on_cross_join(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            import pyarrow
+
+            sql = """
+            select t1.*, t2.* from (
+            select explode(sequence(1, 3)) v
+            ) t1 left join (
+            select explode(sequence(1, 3)) v
+            ) t2
+            """
+            with self.sql_conf({"spark.sql.crossJoin.enabled": True}):
+                df = self.spark.sql(sql)
+                table = df.toTable()
+                arrow_schema = table.schema
+                self.assertTrue(
+                    arrow_schema.equals(
+                        pyarrow.schema(
+                            [
+                                pyarrow.field("v", pyarrow.int32(), nullable=False),
+                                pyarrow.field("v", pyarrow.int32(), nullable=True),
+                            ],
+                        ),
+                    ),
+                )
+
+    @unittest.skipIf(have_pyarrow, "Required Pyarrow was found.")
+    def test_to_table_required_pyarrow_not_found(self):
+        with QuietTest(self.sc):
+            with self.assertRaisesRegex(ImportError, "PyArrow >= .* must be installed"):
+                self._to_table()
+
+    @unittest.skipIf(not have_pandas, pandas_requirement_message)  # type: ignore
+    def test_to_table_nullable_integer(self):
+        import pyarrow
+
+        schema = StructType().add("a", IntegerType()).add("b", StringType()).add("c", IntegerType())
+        data = [(1, "foo", 16777220), (None, "bar", None)]
+        df = self.spark.createDataFrame(data, schema)
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            arrow_schema = df.toTable().schema
+        self.assertTrue(
+            arrow_schema.equals(
+                pyarrow.schema(
+                    [
+                        pyarrow.field("a", pyarrow.int32()),
+                        pyarrow.field("b", pyarrow.string()),
+                        pyarrow.field("c", pyarrow.int32()),
+                    ],
+                ),
+            ),
+        )
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_from_empty_dataframe(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            sql = """
+                SELECT CAST(1 AS TINYINT) AS tinyint,
+                CAST(1 AS SMALLINT) AS smallint,
+                CAST(1 AS INT) AS int,
+                CAST(1 AS BIGINT) AS bigint,
+                CAST(0 AS FLOAT) AS float,
+                CAST(0 AS DOUBLE) AS double,
+                CAST(1 AS BOOLEAN) AS boolean,
+                CAST('foo' AS STRING) AS string,
+                CAST('2019-01-01' AS TIMESTAMP) AS timestamp,
+                CAST('2019-01-01' AS TIMESTAMP_NTZ) AS timestamp_ntz,
+                INTERVAL '1563:04' MINUTE TO SECOND AS day_time_interval
+                """
+            schema_when_nonempty_df = self.spark.sql(sql).toTable().schema
+            schema_when_empty_df = self.spark.sql(sql).filter("False").toTable().schema
+            self.assertTrue(schema_when_nonempty_df.equals(schema_when_empty_df))
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_from_null_dataframe(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            import pyarrow
+
+            sql = """
+                SELECT CAST(NULL AS TINYINT) AS tinyint,
+                CAST(NULL AS SMALLINT) AS smallint,
+                CAST(NULL AS INT) AS int,
+                CAST(NULL AS BIGINT) AS bigint,
+                CAST(NULL AS FLOAT) AS float,
+                CAST(NULL AS DOUBLE) AS double,
+                CAST(NULL AS BOOLEAN) AS boolean,
+                CAST(NULL AS STRING) AS string,
+                CAST(NULL AS TIMESTAMP) AS timestamp,
+                CAST(NULL AS TIMESTAMP_NTZ) AS timestamp_ntz,
+                INTERVAL '1563:04' MINUTE TO SECOND AS day_time_interval
+                """
+            table = self.spark.sql(sql).toTable()
+            arrow_schema = table.schema
+            self.assertTrue(
+                arrow_schema.equals(
+                    pyarrow.schema(
+                        [
+                            pyarrow.field("tinyint", pyarrow.int8()),
+                            pyarrow.field("smallint", pyarrow.int16()),
+                            pyarrow.field("int", pyarrow.int32()),
+                            pyarrow.field("bigint", pyarrow.int64()),
+                            pyarrow.field("float", pyarrow.float32()),
+                            pyarrow.field("double", pyarrow.float64()),
+                            pyarrow.field("boolean", pyarrow.bool_()),
+                            pyarrow.field("string", pyarrow.string()),
+                            pyarrow.field("timestamp", pyarrow.timestamp("us", tz="UTC")),
+                            pyarrow.field("timestamp_ntz", pyarrow.timestamp("us")),
+                            pyarrow.field("day_time_interval", pyarrow.duration("us")),
+                        ],
+                    ),
+                ),
+            )
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_from_mixed_dataframe(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            sql = """
+            SELECT CAST(col1 AS TINYINT) AS tinyint,
+            CAST(col2 AS SMALLINT) AS smallint,
+            CAST(col3 AS INT) AS int,
+            CAST(col4 AS BIGINT) AS bigint,
+            CAST(col5 AS FLOAT) AS float,
+            CAST(col6 AS DOUBLE) AS double,
+            CAST(col7 AS BOOLEAN) AS boolean,
+            CAST(col8 AS STRING) AS string,
+            timestamp_seconds(col9) AS timestamp,
+            timestamp_seconds(col10) AS timestamp_ntz,
+            INTERVAL '1563:04' MINUTE TO SECOND AS day_time_interval
+            FROM VALUES (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+                        (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+            """
+            table_with_some_nulls = self.spark.sql(sql).toTable()
+            table_with_only_nulls = self.spark.sql(sql).filter("tinyint is null").toTable()
+            self.assertTrue(table_with_some_nulls.schema.equals(table_with_only_nulls.schema))
+
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)  # type: ignore
+    def test_to_table_for_array_of_struct(self):
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            import pyarrow
+            import pyarrow.types
+
+            df = self.spark.createDataFrame(
+                [[[("a", 2, 3.0), ("a", 2, 3.0)]], [[("b", 5, 6.0), ("b", 5, 6.0)]]],
+                "array_struct_col Array<struct<col1:string, col2:long, col3:double>>",
+            )
+
+            table = df.toTable()
+            self.assertEqual(type(table), pyarrow.Table)
+            self.assertEqual(
+                table.field('array_struct_col').type,
+                pyarrow.list_(
+                    pyarrow.struct([
+                        ('col1', pyarrow.string()),
+                        ('col2', pyarrow.int64()),
+                        ('col3', pyarrow.float64()),
+                    ]),
+                ),
+            )
+
     def _to_pandas(self):
         from datetime import datetime, date, timedelta
 
