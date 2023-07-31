@@ -1654,6 +1654,29 @@ class DataFrame:
 
     collect.__doc__ = PySparkDataFrame.collect.__doc__
 
+    def toRecordBatches(self, maintain_order: bool = False) -> Iterator["pa.RecordBatch"]:
+        if self._plan is None:
+            raise Exception("Cannot collect on empty plan.")
+        if self._session is None:
+            raise Exception("Cannot collect on empty session.")
+        query = self._plan.to_proto(self._session.client)
+        for response in self._session.client.to_record_batches(query):
+            if isinstance(response, pa.RecordBatch):
+                yield response
+
+    toRecordBatches.__doc__ = PySparkDataFrame.toRecordBatches.__doc__
+
+    def toTable(self) -> "pa.Table":
+        if self._plan is None:
+            raise Exception("Cannot collect on empty plan.")
+        if self._session is None:
+            raise Exception("Cannot collect on empty session.")
+        query = self._plan.to_proto(self._session.client)
+        table, _, = self._session.client.to_table(query)
+        return table
+
+    toTable.__doc__ = PySparkDataFrame.toTable.__doc__
+
     def toPandas(self) -> "pandas.DataFrame":
         if self._plan is None:
             raise Exception("Cannot collect on empty plan.")
