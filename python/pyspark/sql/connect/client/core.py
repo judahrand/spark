@@ -745,18 +745,26 @@ class SparkConnectClient(object):
     ) -> Iterator[PlanObservedMetrics]:
         return (PlanObservedMetrics(x.name, [v for v in x.values]) for x in metrics)
 
-    def to_table_as_iterator(self, plan: pb2.Plan) -> Iterator[Union[StructType, "pa.Table"]]:
+    def to_record_batches(self, plan: pb2.Plan) -> Iterator[Union[StructType, "pa.RecordBatch"]]:
         """
-        Return given plan as a PyArrow Table iterator.
+        Return given plan as PyArrow RecordBatch iterator.
         """
         logger.info(f"Executing plan {self._proto_to_string(plan)}")
         req = self._execute_plan_request_with_metadata()
         req.plan.CopyFrom(plan)
         for response in self._execute_and_fetch_as_iterator(req):
-            if isinstance(response, StructType):
+            if isinstance(response, (StructType, pa.RecordBatch)):
                 yield response
-            elif isinstance(response, pa.RecordBatch):
+
+    def to_table_as_iterator(self, plan: pb2.Plan) -> Iterator[Union[StructType, "pa.Table"]]:
+        """
+        Return given plan as a PyArrow Table iterator.
+        """
+        for response in self.to_record_batches(plan):
+            if isinstance(response, pa.RecordBatch):
                 yield pa.Table.from_batches([response])
+            else:
+                yield response
 
     def to_table(self, plan: pb2.Plan) -> Tuple["pa.Table", Optional[StructType]]:
         """
